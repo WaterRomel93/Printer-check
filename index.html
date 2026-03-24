@@ -5,9 +5,16 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Printer Inventory Tracker — Puretec Industrial Water</title>
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🖨️</text></svg>" />
+
+  <!-- React -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.3.1/umd/react.production.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.3.1/umd/react-dom.production.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.26.2/babel.min.js"></script>
+
+  <!-- Firebase (compat SDK for easy script-tag usage) -->
+  <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-database-compat.js"></script>
+
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body { background: #111318; }
@@ -16,26 +23,57 @@
     ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.12); border-radius: 4px; }
     ::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.2); }
     input[type="range"] { height: 6px; }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+    @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
   </style>
 </head>
 <body>
   <div id="root"></div>
+
+  <script>
+    // ╔══════════════════════════════════════════════════════════════╗
+    // ║  FIREBASE CONFIG — Replace with YOUR Firebase project info  ║
+    // ║  See README.md for setup instructions                       ║
+    // ╚══════════════════════════════════════════════════════════════╝
+    const firebaseConfig = {
+      apiKey: "YOUR_API_KEY",
+      authDomain: "YOUR_PROJECT.firebaseapp.com",
+      databaseURL: "https://YOUR_PROJECT-default-rtdb.firebaseio.com",
+      projectId: "YOUR_PROJECT",
+      storageBucket: "YOUR_PROJECT.appspot.com",
+      messagingSenderId: "000000000000",
+      appId: "YOUR_APP_ID"
+    };
+
+    // ╔══════════════════════════════════════════════════╗
+    // ║  PASSWORD HASH — Change this to your own hash   ║
+    // ║  Default password: puretec2026                  ║
+    // ╚══════════════════════════════════════════════════╝
+    // To generate a new hash: open browser console and run:
+    //   crypto.subtle.digest('SHA-256', new TextEncoder().encode('YOUR_PASSWORD'))
+    //     .then(b => console.log(Array.from(new Uint8Array(b)).map(x=>x.toString(16).padStart(2,'0')).join('')))
+    const PASSWORD_HASH = "f7f60b9dda98928c92d1e8b4de5ece818bd181f3f1dd51f867c42d7a508fee65";
+    // ^ This is a placeholder — it will be overwritten by the real hash below during setup.
+
+    // Initialize Firebase
+    firebase.initializeApp(firebaseConfig);
+    const db = firebase.database();
+    const printersRef = db.ref("printers");
+  </script>
+
   <script type="text/babel">
-    const { useState, useEffect, useCallback } = React;
+    const { useState, useEffect, useCallback, useRef } = React;
 
+    /* ─── Config ─── */
     const BRANCHES = ["Oxnard", "Oxnard 3501", "Anaheim", "Arizona", "San Diego", "San Jose"];
-    const STORAGE_KEY = "printer-inventory-data";
-
     const TONER_COLORS = [
       { key: "black", label: "Black", color: "#222222", barColor: "#333333" },
       { key: "cyan", label: "Cyan", color: "#00AEEF" },
       { key: "magenta", label: "Magenta", color: "#EC008C" },
       { key: "yellow", label: "Yellow", color: "#FFD700" },
     ];
-
     const PAPER_SIZES = ["Letter (8.5x11)", "Legal (8.5x14)", "Ledger (11x17)", "A4", "A3", "Custom"];
     const PAPER_TYPES = ["Plain Paper 1", "Plain Paper 2", "Letter Head", "Recycled", "Cardstock", "Labels", "Envelope"];
-
     const DEFAULT_TONERS = { black: 100, cyan: 100, magenta: 100, yellow: 100 };
     const DEFAULT_TRAY = { name: "", status: 100, paperSize: "Letter (8.5x11)", paperType: "Plain Paper 1" };
     const EMPTY_FORM = {
@@ -44,92 +82,49 @@
       trays: [{ ...DEFAULT_TRAY, name: "Tray 1" }],
     };
 
-    const PuretecLogo = () => (
-      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0.001 0 178 95" style={{ height: 28, flexShrink: 0 }}>
+    /* ─── Helpers ─── */
+    const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+    const statusLabel = (level) => { if (level > 75) return "Over 75%"; if (level > 50) return "Over 50%"; if (level > 25) return "Over 25%"; if (level > 0) return "Low"; return "Empty"; };
+    const tonerZone = (level) => { if (level > 50) return { label: "Good", color: "#5CB85C" }; if (level >= 25) return { label: "Low", color: "#F0AD4E" }; return { label: "Critical", color: "#D83A35" }; };
+    const worstToner = (toners) => { if (!toners) return 100; return Math.min(...Object.values(toners).map(Number)); };
+
+    const migratePrinter = (p) => {
+      if (p.toners && p.trays) return p;
+      const level = typeof p.toner === "number" ? p.toner : 100;
+      return { ...p, isColor: p.isColor !== undefined ? p.isColor : true,
+        toners: p.toners || { black: level, cyan: level, magenta: level, yellow: level },
+        trays: p.trays || [{ name: "Tray 1", status: 100, paperSize: "Letter (8.5x11)", paperType: "Plain Paper 1" }],
+      };
+    };
+
+    async function hashPassword(pw) {
+      const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(pw));
+      return Array.from(new Uint8Array(buf)).map((x) => x.toString(16).padStart(2, "0")).join("");
+    }
+
+    /* ─── Shared Styles ─── */
+    const cellPad = { padding: "7px 12px" };
+    const sectionHeader = { fontSize: 13, fontWeight: 600, color: "#8EA4BD", padding: "10px 14px", borderBottom: "1px solid rgba(255,255,255,0.06)", display: "flex", alignItems: "center", gap: 8 };
+    const inputStyle = { width: "100%", padding: "9px 11px", borderRadius: 8, border: "1px solid rgba(255,255,255,0.12)", backgroundColor: "rgba(255,255,255,0.06)", color: "#e0e0e0", fontSize: 13, outline: "none", fontFamily: "'Helvetica Neue', Helvetica, Arial, sans-serif", boxSizing: "border-box" };
+    const btnPrimary = { padding: "9px 20px", borderRadius: 8, border: "none", cursor: "pointer", backgroundColor: "#1664B5", color: "#fff", fontWeight: 600, fontSize: 13, fontFamily: "'Helvetica Neue', Helvetica, Arial, sans-serif", transition: "background 0.2s" };
+    const btnGhost = { ...btnPrimary, backgroundColor: "transparent", border: "1px solid rgba(255,255,255,0.15)", color: "#ccc" };
+    const selectStyle = { ...inputStyle, appearance: "auto", backgroundColor: "#1e2129" };
+    const optionStyle = { backgroundColor: "#1e2129", color: "#e0e0e0" };
+
+    /* ─── Sub-components ─── */
+    const PuretecLogo = ({ height = 28 }) => (
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0.001 0 178 95" style={{ height, flexShrink: 0 }}>
         <path fill="#fff" stroke="#fff" strokeWidth="1.7313" d="M27.856,82.056c8.787-33.964,18.206-53.287,53.363-80.81C-26.759,14.715-5.415,63.902,27.856,82.056z"/>
         <path fill="#fff" stroke="#fff" strokeWidth="1.7313" d="M154.669,16.472c-4.541,20.733-17.992,52.018-52.734,77.294C201.749,77.37,182.142,28.422,154.669,16.472z"/>
         <path fill="#fff" stroke="#fff" strokeWidth="1.7313" d="M40.437,87.77c-0.16,0.037,10.021,0.726,9.393,0.726c0-52.115,48.238-75.228,59.487-75.221c39.097,3.646-50.07,92.788-41.281,35.402C42.298,85.567,79.962,76.197,79.334,76.197c10.044-1.755,42.062-27.521,47.712-48.016c1.882-4.684,13.184-26.351-16.322-26.351C80.59,8.271,41.668,38.722,40.413,87.91"/>
       </svg>
     );
 
-    const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
-
-    const statusLabel = (level) => {
-      if (level > 75) return "Over 75%";
-      if (level > 50) return "Over 50%";
-      if (level > 25) return "Over 25%";
-      if (level > 0) return "Low";
-      return "Empty";
-    };
-
-    const tonerZone = (level) => {
-      if (level > 50) return { label: "Good", color: "#5CB85C" };
-      if (level >= 25) return { label: "Low", color: "#F0AD4E" };
-      return { label: "Critical", color: "#D83A35" };
-    };
-
-    const worstToner = (toners) => {
-      if (!toners) return 100;
-      return Math.min(...Object.values(toners).map(Number));
-    };
-
-    const migratePrinter = (p) => {
-      if (p.toners && p.trays) return p;
-      const level = typeof p.toner === "number" ? p.toner : 100;
-      return {
-        ...p,
-        isColor: p.isColor !== undefined ? p.isColor : true,
-        toners: p.toners || { black: level, cyan: level, magenta: level, yellow: level },
-        trays: p.trays || [{ name: "Tray 1", status: 100, paperSize: "Letter (8.5x11)", paperType: "Plain Paper 1" }],
-      };
-    };
-
-    /* ─── localStorage-based persistence ─── */
-    function loadPrinters() {
-      try {
-        const raw = localStorage.getItem(STORAGE_KEY);
-        const data = raw ? JSON.parse(raw) : [];
-        return data.map(migratePrinter);
-      } catch { return []; }
-    }
-
-    function savePrinters(printers) {
-      try { localStorage.setItem(STORAGE_KEY, JSON.stringify(printers)); }
-      catch (e) { console.error("Storage save error:", e); }
-    }
-
-    /* ─── Shared Styles ─── */
-    const cellPad = { padding: "7px 12px" };
-    const sectionHeader = {
-      fontSize: 13, fontWeight: 600, color: "#8EA4BD", padding: "10px 14px",
-      borderBottom: "1px solid rgba(255,255,255,0.06)", display: "flex", alignItems: "center", gap: 8,
-    };
-    const inputStyle = {
-      width: "100%", padding: "9px 11px", borderRadius: 8, border: "1px solid rgba(255,255,255,0.12)",
-      backgroundColor: "rgba(255,255,255,0.06)", color: "#e0e0e0", fontSize: 13, outline: "none",
-      fontFamily: "'Helvetica Neue', Helvetica, Arial, sans-serif", boxSizing: "border-box",
-    };
-    const btnPrimary = {
-      padding: "9px 20px", borderRadius: 8, border: "none", cursor: "pointer",
-      backgroundColor: "#1664B5", color: "#fff", fontWeight: 600, fontSize: 13,
-      fontFamily: "'Helvetica Neue', Helvetica, Arial, sans-serif", transition: "background 0.2s",
-    };
-    const btnGhost = {
-      ...btnPrimary, backgroundColor: "transparent", border: "1px solid rgba(255,255,255,0.15)", color: "#ccc",
-    };
-    const selectStyle = { ...inputStyle, appearance: "auto", backgroundColor: "#1e2129" };
-    const optionStyle = { backgroundColor: "#1e2129", color: "#e0e0e0" };
-
-    /* ─── Sub-components ─── */
     const TonerBarRow = ({ label, level, barColor }) => (
       <tr style={{ borderBottom: "1px solid rgba(255,255,255,0.04)" }}>
         <td style={{ ...cellPad, fontSize: 12, color: "#c0c0c0", width: 100 }}>{label}</td>
         <td style={{ ...cellPad, fontSize: 12, color: "#858585", width: 70 }}>{statusLabel(level)}</td>
-        <td style={{ ...cellPad }}>
-          <div style={{ height: 14, borderRadius: 2, backgroundColor: "rgba(255,255,255,0.06)", overflow: "hidden" }}>
-            <div style={{ width: `${level}%`, height: "100%", backgroundColor: barColor || "#999", transition: "width 0.4s ease" }} />
-          </div>
-        </td>
+        <td style={{ ...cellPad }}><div style={{ height: 14, borderRadius: 2, backgroundColor: "rgba(255,255,255,0.06)", overflow: "hidden" }}><div style={{ width: `${level}%`, height: "100%", backgroundColor: barColor || "#999", transition: "width 0.4s ease" }} /></div></td>
       </tr>
     );
 
@@ -147,45 +142,149 @@
     };
 
     const KpiCard = ({ value, label, color }) => (
-      <div style={{
-        backgroundColor: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.08)",
-        borderRadius: 10, padding: "16px 12px", textAlign: "center", flex: "1 1 0", minWidth: 90,
-      }}>
+      <div style={{ backgroundColor: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.08)", borderRadius: 10, padding: "16px 12px", textAlign: "center", flex: "1 1 0", minWidth: 90 }}>
         <div style={{ fontSize: 28, fontWeight: 700, color: color || "#fff", lineHeight: 1.1 }}>{value}</div>
         <div style={{ fontSize: 11, color: "#858585", marginTop: 5, letterSpacing: 0.3 }}>{label}</div>
       </div>
     );
 
     const Badge = ({ zone }) => (
-      <span style={{
-        display: "inline-block", padding: "2px 10px", borderRadius: 4,
-        fontSize: 11, fontWeight: 600, color: "#fff", backgroundColor: zone.color,
-      }}>{zone.label}</span>
+      <span style={{ display: "inline-block", padding: "2px 10px", borderRadius: 4, fontSize: 11, fontWeight: 600, color: "#fff", backgroundColor: zone.color }}>{zone.label}</span>
     );
 
-    /* ═══════════════════ MAIN APP ═══════════════════ */
-    function PrinterTracker() {
-      const [printers, setPrinters] = useState(() => loadPrinters());
+    /* ═══════════════ LOGIN SCREEN ═══════════════ */
+    function LoginScreen({ onLogin }) {
+      const [pw, setPw] = useState("");
+      const [error, setError] = useState("");
+      const [checking, setChecking] = useState(false);
+
+      const handleSubmit = async (e) => {
+        e.preventDefault();
+        setChecking(true);
+        setError("");
+        const hash = await hashPassword(pw.trim());
+
+        // Check against the hash stored in Firebase (or fallback to hardcoded)
+        try {
+          const snap = await db.ref("config/passwordHash").once("value");
+          const storedHash = snap.val();
+          if (storedHash && hash === storedHash) {
+            sessionStorage.setItem("printer-auth", "1");
+            onLogin();
+            return;
+          }
+        } catch (e) { /* Firebase not configured yet, skip */ }
+
+        // Fallback: check against the hardcoded hash
+        if (hash === PASSWORD_HASH) {
+          sessionStorage.setItem("printer-auth", "1");
+          onLogin();
+        } else {
+          setError("Incorrect password");
+          setChecking(false);
+        }
+      };
+
+      return (
+        <div style={{ minHeight: "100vh", backgroundColor: "#111318", display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "'Helvetica Neue', Helvetica, Arial, sans-serif", padding: 16 }}>
+          <div style={{ animation: "fadeIn 0.5s ease", width: "100%", maxWidth: 400, textAlign: "center" }}>
+            {/* Logo area */}
+            <div style={{ background: "linear-gradient(135deg, #0D3C6D 0%, #1664B5 100%)", borderRadius: "14px 14px 0 0", padding: "32px 24px 24px" }}>
+              <PuretecLogo height={36} />
+              <div style={{ fontSize: 20, fontWeight: 700, color: "#fff", marginTop: 14, letterSpacing: -0.3 }}>Printer Inventory Tracker</div>
+              <div style={{ fontSize: 12, color: "#C9D5DE", marginTop: 4 }}>Sign in to continue</div>
+            </div>
+
+            {/* Form */}
+            <div style={{ backgroundColor: "#1a1d24", border: "1px solid rgba(255,255,255,0.1)", borderTop: "none", borderRadius: "0 0 14px 14px", padding: "28px 24px" }}>
+              <form onSubmit={handleSubmit}>
+                <div style={{ textAlign: "left", marginBottom: 6 }}>
+                  <span style={{ fontSize: 11, color: "#858585" }}>Password</span>
+                </div>
+                <input
+                  type="password" value={pw} onChange={(e) => { setPw(e.target.value); setError(""); }}
+                  placeholder="Enter access password"
+                  autoFocus
+                  style={{ ...inputStyle, fontSize: 14, padding: "12px 14px", marginBottom: error ? 8 : 20 }}
+                />
+                {error && (
+                  <div style={{ color: "#D83A35", fontSize: 12, marginBottom: 12, textAlign: "left" }}>{error}</div>
+                )}
+                <button type="submit" disabled={!pw.trim() || checking}
+                  style={{ ...btnPrimary, width: "100%", padding: "12px 20px", fontSize: 14, opacity: !pw.trim() || checking ? 0.5 : 1, cursor: !pw.trim() || checking ? "not-allowed" : "pointer" }}>
+                  {checking ? "Checking..." : "Sign In"}
+                </button>
+              </form>
+              <div style={{ fontSize: 11, color: "#646464", marginTop: 16 }}>
+                Contact IT for access credentials
+              </div>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    /* ═══════════════ MAIN TRACKER ═══════════════ */
+    function PrinterTracker({ onLogout }) {
+      const [printers, setPrinters] = useState([]);
       const [form, setForm] = useState(JSON.parse(JSON.stringify(EMPTY_FORM)));
       const [editing, setEditing] = useState(false);
       const [showForm, setShowForm] = useState(false);
       const [filter, setFilter] = useState("All");
+      const [loaded, setLoaded] = useState(false);
       const [expanded, setExpanded] = useState(null);
       const [deleteConfirm, setDeleteConfirm] = useState(null);
       const [sortCol, setSortCol] = useState(null);
       const [sortDir, setSortDir] = useState("asc");
+      const [syncStatus, setSyncStatus] = useState("connecting");
 
-      const persist = useCallback((next) => { setPrinters(next); savePrinters(next); }, []);
+      /* ─── Firebase real-time listener ─── */
+      useEffect(() => {
+        setSyncStatus("connecting");
+        const unsub = printersRef.on("value", (snapshot) => {
+          const data = snapshot.val();
+          if (data) {
+            // Firebase stores as object with keys, convert to array
+            const arr = Object.keys(data).map((k) => migratePrinter({ ...data[k], _fbKey: k }));
+            setPrinters(arr);
+          } else {
+            setPrinters([]);
+          }
+          setLoaded(true);
+          setSyncStatus("synced");
+        }, (err) => {
+          console.error("Firebase read error:", err);
+          setSyncStatus("error");
+          setLoaded(true);
+        });
+        return () => printersRef.off("value", unsub);
+      }, []);
+
+      /* ─── Firebase write helpers ─── */
+      const savePrinter = (printer) => {
+        const { _fbKey, ...data } = printer;
+        if (_fbKey) {
+          printersRef.child(_fbKey).set(data);
+        } else {
+          printersRef.push(data);
+        }
+        setSyncStatus("syncing");
+        setTimeout(() => setSyncStatus("synced"), 500);
+      };
+
+      const deletePrinter = (printer) => {
+        if (printer._fbKey) {
+          printersRef.child(printer._fbKey).remove();
+          setSyncStatus("syncing");
+          setTimeout(() => setSyncStatus("synced"), 500);
+        }
+      };
 
       const openAdd = () => { setForm(JSON.parse(JSON.stringify(EMPTY_FORM))); setEditing(false); setShowForm(true); };
       const openEdit = (p) => { setForm(JSON.parse(JSON.stringify(p))); setEditing(true); setShowForm(true); };
       const closeForm = () => { setShowForm(false); setEditing(false); };
 
-      const clampToners = (t) => {
-        const out = {};
-        for (const k of Object.keys(t)) out[k] = Math.min(100, Math.max(0, Number(t[k]) || 0));
-        return out;
-      };
+      const clampToners = (t) => { const out = {}; for (const k of Object.keys(t)) out[k] = Math.min(100, Math.max(0, Number(t[k]) || 0)); return out; };
 
       const handleSubmit = () => {
         if (!form.name.trim() || !form.model.trim()) return;
@@ -195,12 +294,18 @@
           trays: form.trays.map((t) => ({ ...t, status: Math.min(100, Math.max(0, Number(t.status) || 0)) })),
         };
         if (!clean.isColor) { clean.toners = { ...clean.toners, cyan: 0, magenta: 0, yellow: 0 }; }
-        if (editing) persist(printers.map((p) => (p.id === clean.id ? clean : p)));
-        else persist([...printers, { ...clean, id: uid() }]);
+        if (editing) {
+          savePrinter(clean);
+        } else {
+          const { _fbKey, ...data } = { ...clean, id: uid() };
+          printersRef.push(data);
+          setSyncStatus("syncing");
+          setTimeout(() => setSyncStatus("synced"), 500);
+        }
         closeForm();
       };
 
-      const handleDelete = (id) => { persist(printers.filter((p) => p.id !== id)); setDeleteConfirm(null); };
+      const handleDelete = (p) => { deletePrinter(p); setDeleteConfirm(null); };
 
       const handleSort = (col) => {
         if (sortCol === col) setSortDir(sortDir === "asc" ? "desc" : "asc");
@@ -235,13 +340,18 @@
       };
 
       const updateToner = (key, val) => setForm({ ...form, toners: { ...form.toners, [key]: val === "" ? "" : Number(val) } });
-      const updateTray = (idx, field, val) => {
-        const trays = [...form.trays];
-        trays[idx] = { ...trays[idx], [field]: val };
-        setForm({ ...form, trays });
-      };
+      const updateTray = (idx, field, val) => { const trays = [...form.trays]; trays[idx] = { ...trays[idx], [field]: val }; setForm({ ...form, trays }); };
       const addTray = () => setForm({ ...form, trays: [...form.trays, { ...DEFAULT_TRAY, name: `Tray ${form.trays.length + 1}` }] });
       const removeTray = (idx) => { if (form.trays.length <= 1) return; setForm({ ...form, trays: form.trays.filter((_, i) => i !== idx) }); };
+
+      const syncDot = { connecting: "#F0AD4E", syncing: "#F0AD4E", synced: "#5CB85C", error: "#D83A35" }[syncStatus];
+      const syncText = { connecting: "Connecting...", syncing: "Syncing...", synced: "Live", error: "Offline" }[syncStatus];
+
+      if (!loaded) return (
+        <div style={{ minHeight: "100vh", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", backgroundColor: "#111318", color: "#858585", fontFamily: "'Helvetica Neue', Helvetica, Arial, sans-serif", gap: 12 }}>
+          <div style={{ animation: "pulse 1.5s infinite", fontSize: 14 }}>Connecting to database...</div>
+        </div>
+      );
 
       return (
         <div style={{ minHeight: "100vh", backgroundColor: "#111318", color: "#e0e0e0", fontFamily: "'Helvetica Neue', Helvetica, Arial, sans-serif", fontSize: 13 }}>
@@ -251,9 +361,16 @@
             <PuretecLogo />
             <div style={{ flex: 1 }}>
               <div style={{ fontSize: 21, fontWeight: 700, color: "#fff", letterSpacing: -0.3 }}>Printer Inventory Tracker</div>
-              <div style={{ fontSize: 12, color: "#C9D5DE", marginTop: 2 }}>{printers.length} printer{printers.length !== 1 ? "s" : ""} across {BRANCHES.length} branches</div>
+              <div style={{ fontSize: 12, color: "#C9D5DE", marginTop: 2, display: "flex", alignItems: "center", gap: 8 }}>
+                {printers.length} printer{printers.length !== 1 ? "s" : ""} across {BRANCHES.length} branches
+                <span style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 10, color: syncDot, opacity: 0.8 }}>
+                  <span style={{ width: 6, height: 6, borderRadius: "50%", backgroundColor: syncDot, display: "inline-block" }} />
+                  {syncText}
+                </span>
+              </div>
             </div>
             <button onClick={openAdd} style={{ ...btnPrimary, backgroundColor: "rgba(255,255,255,0.15)", backdropFilter: "blur(4px)" }}>+ Add Printer</button>
+            <button onClick={onLogout} title="Sign Out" style={{ ...btnGhost, padding: "9px 14px", fontSize: 12, borderColor: "rgba(255,255,255,0.1)" }}>Sign Out</button>
           </div>
 
           <div style={{ maxWidth: 1100, margin: "0 auto", padding: "18px 14px" }}>
@@ -331,15 +448,12 @@
                   const isOpen = expanded === p.id;
                   const toners = p.isColor !== false ? TONER_COLORS : [TONER_COLORS[0]];
                   return (
-                    <div key={p.id} style={{
-                      backgroundColor: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.06)",
+                    <div key={p._fbKey || p.id} style={{
+                      backgroundColor: "rgba(255,255,255,0.03)", border: "1px solid",
                       borderRadius: 10, overflow: "hidden", transition: "border-color 0.2s",
                       borderColor: isOpen ? "rgba(22,100,181,0.3)" : "rgba(255,255,255,0.06)",
                     }}>
-                      {/* Row summary */}
-                      <div onClick={() => setExpanded(isOpen ? null : p.id)} style={{
-                        display: "flex", alignItems: "center", gap: 12, padding: "12px 16px", cursor: "pointer", flexWrap: "wrap",
-                      }}>
+                      <div onClick={() => setExpanded(isOpen ? null : p.id)} style={{ display: "flex", alignItems: "center", gap: 12, padding: "12px 16px", cursor: "pointer", flexWrap: "wrap" }}>
                         <span style={{ fontSize: 11, color: "#646464", transition: "transform 0.2s", transform: isOpen ? "rotate(90deg)" : "rotate(0deg)" }}>▶</span>
                         <div style={{ flex: "1 1 150px", minWidth: 120 }}>
                           <div style={{ fontWeight: 600, fontSize: 14, color: "#fff" }}>{p.name}</div>
@@ -356,35 +470,30 @@
                         <Badge zone={zone} />
                         <div style={{ display: "flex", gap: 5 }} onClick={(e) => e.stopPropagation()}>
                           <button title="Edit" onClick={() => openEdit(p)} style={{ ...btnGhost, padding: "4px 10px", fontSize: 11 }}>✏️</button>
-                          {deleteConfirm === p.id ? (
+                          {deleteConfirm === (p._fbKey || p.id) ? (
                             <React.Fragment>
-                              <button onClick={() => handleDelete(p.id)} style={{ ...btnPrimary, padding: "4px 10px", fontSize: 11, backgroundColor: "#D83A35" }}>Yes</button>
+                              <button onClick={() => handleDelete(p)} style={{ ...btnPrimary, padding: "4px 10px", fontSize: 11, backgroundColor: "#D83A35" }}>Yes</button>
                               <button onClick={() => setDeleteConfirm(null)} style={{ ...btnGhost, padding: "4px 10px", fontSize: 11 }}>No</button>
                             </React.Fragment>
                           ) : (
-                            <button title="Delete" onClick={() => setDeleteConfirm(p.id)} style={{ ...btnGhost, padding: "4px 10px", fontSize: 11, borderColor: "rgba(216,58,53,0.3)", color: "#D83A35" }}>🗑️</button>
+                            <button title="Delete" onClick={() => setDeleteConfirm(p._fbKey || p.id)} style={{ ...btnGhost, padding: "4px 10px", fontSize: 11, borderColor: "rgba(216,58,53,0.3)", color: "#D83A35" }}>🗑️</button>
                           )}
                         </div>
                       </div>
 
-                      {/* Expanded detail */}
                       {isOpen && (
                         <div style={{ borderTop: "1px solid rgba(255,255,255,0.06)" }}>
                           <div style={{ display: "flex", flexWrap: "wrap" }}>
                             <div style={{ flex: "1 1 320px", borderRight: "1px solid rgba(255,255,255,0.04)" }}>
                               <div style={sectionHeader}><span style={{ fontSize: 14 }}>🎨</span> Supply Status</div>
                               <table style={{ width: "100%", borderCollapse: "collapse" }}>
-                                <thead>
-                                  <tr style={{ backgroundColor: "rgba(22,100,181,0.1)" }}>
-                                    <th style={{ ...cellPad, textAlign: "left", fontSize: 11, fontWeight: 600, color: "#8EA4BD" }}>Supply</th>
-                                    <th style={{ ...cellPad, textAlign: "left", fontSize: 11, fontWeight: 600, color: "#8EA4BD" }}>Status</th>
-                                    <th style={{ ...cellPad, textAlign: "left", fontSize: 11, fontWeight: 600, color: "#8EA4BD" }}>Level</th>
-                                  </tr>
-                                </thead>
+                                <thead><tr style={{ backgroundColor: "rgba(22,100,181,0.1)" }}>
+                                  <th style={{ ...cellPad, textAlign: "left", fontSize: 11, fontWeight: 600, color: "#8EA4BD" }}>Supply</th>
+                                  <th style={{ ...cellPad, textAlign: "left", fontSize: 11, fontWeight: 600, color: "#8EA4BD" }}>Status</th>
+                                  <th style={{ ...cellPad, textAlign: "left", fontSize: 11, fontWeight: 600, color: "#8EA4BD" }}>Level</th>
+                                </tr></thead>
                                 <tbody>
-                                  {toners.map((tc) => (
-                                    <TonerBarRow key={tc.key} label={`${tc.label} Toner`} level={p.toners[tc.key] || 0} barColor={tc.barColor || tc.color} />
-                                  ))}
+                                  {toners.map((tc) => <TonerBarRow key={tc.key} label={`${tc.label} Toner`} level={p.toners[tc.key] || 0} barColor={tc.barColor || tc.color} />)}
                                 </tbody>
                               </table>
                             </div>
@@ -392,20 +501,12 @@
                               <div style={sectionHeader}><span style={{ fontSize: 14 }}>📄</span> Paper Input Tray Status</div>
                               {p.trays && p.trays.length > 0 ? (
                                 <table style={{ width: "100%", borderCollapse: "collapse" }}>
-                                  <thead>
-                                    <tr style={{ backgroundColor: "rgba(22,100,181,0.1)" }}>
-                                      {["Tray", "Status", "Paper Size", "Paper Type"].map((h) => (
-                                        <th key={h} style={{ ...cellPad, textAlign: "left", fontSize: 11, fontWeight: 600, color: "#8EA4BD" }}>{h}</th>
-                                      ))}
-                                    </tr>
-                                  </thead>
-                                  <tbody>
-                                    {p.trays.map((tray, ti) => <PaperTrayRow key={ti} tray={tray} idx={ti} />)}
-                                  </tbody>
+                                  <thead><tr style={{ backgroundColor: "rgba(22,100,181,0.1)" }}>
+                                    {["Tray", "Status", "Paper Size", "Paper Type"].map((h) => <th key={h} style={{ ...cellPad, textAlign: "left", fontSize: 11, fontWeight: 600, color: "#8EA4BD" }}>{h}</th>)}
+                                  </tr></thead>
+                                  <tbody>{p.trays.map((tray, ti) => <PaperTrayRow key={ti} tray={tray} idx={ti} />)}</tbody>
                                 </table>
-                              ) : (
-                                <div style={{ padding: 16, color: "#646464", fontSize: 12 }}>No paper trays configured.</div>
-                              )}
+                              ) : <div style={{ padding: 16, color: "#646464", fontSize: 12 }}>No paper trays configured.</div>}
                             </div>
                           </div>
                         </div>
@@ -417,25 +518,15 @@
             )}
 
             <div style={{ marginTop: 22, textAlign: "center", fontSize: 11, color: "#646464", borderTop: "1px solid rgba(255,255,255,0.06)", paddingTop: 14 }}>
-              Puretec Industrial Water — Printer Inventory Tracker • Data persisted locally
+              Puretec Industrial Water — Printer Inventory Tracker • Shared database
             </div>
           </div>
 
           {/* MODAL FORM */}
           {showForm && (
-            <div onClick={closeForm} style={{
-              position: "fixed", inset: 0, backgroundColor: "rgba(0,0,0,0.6)",
-              display: "flex", alignItems: "flex-start", justifyContent: "center",
-              zIndex: 1000, padding: "40px 14px", backdropFilter: "blur(4px)", overflowY: "auto",
-            }}>
-              <div onClick={(e) => e.stopPropagation()} style={{
-                backgroundColor: "#1a1d24", border: "1px solid rgba(255,255,255,0.1)",
-                borderRadius: 14, padding: 24, width: "100%", maxWidth: 560,
-                boxShadow: "0 24px 60px rgba(0,0,0,0.5)",
-              }}>
-                <div style={{ fontSize: 17, fontWeight: 700, marginBottom: 18, color: "#fff" }}>
-                  {editing ? "Edit Printer" : "Add Printer"}
-                </div>
+            <div onClick={closeForm} style={{ position: "fixed", inset: 0, backgroundColor: "rgba(0,0,0,0.6)", display: "flex", alignItems: "flex-start", justifyContent: "center", zIndex: 1000, padding: "40px 14px", backdropFilter: "blur(4px)", overflowY: "auto" }}>
+              <div onClick={(e) => e.stopPropagation()} style={{ backgroundColor: "#1a1d24", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 14, padding: 24, width: "100%", maxWidth: 560, boxShadow: "0 24px 60px rgba(0,0,0,0.5)" }}>
+                <div style={{ fontSize: 17, fontWeight: 700, marginBottom: 18, color: "#fff" }}>{editing ? "Edit Printer" : "Add Printer"}</div>
 
                 <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 12 }}>
                   <label style={{ flex: "1 1 200px" }}>
@@ -460,7 +551,6 @@
                   </label>
                 </div>
 
-                {/* Toner Levels */}
                 <div style={{ marginBottom: 16, backgroundColor: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.06)", borderRadius: 8, overflow: "hidden" }}>
                   <div style={{ ...sectionHeader, fontSize: 12 }}>🎨 Supply Levels</div>
                   <div style={{ padding: "10px 14px", display: "flex", flexDirection: "column", gap: 8 }}>
@@ -468,19 +558,14 @@
                       <div key={tc.key} style={{ display: "flex", alignItems: "center", gap: 8 }}>
                         <div style={{ width: 12, height: 12, borderRadius: 2, backgroundColor: tc.barColor || tc.color, flexShrink: 0 }} />
                         <span style={{ fontSize: 12, color: "#c0c0c0", width: 65, flexShrink: 0 }}>{tc.label}</span>
-                        <input type="range" min={0} max={100} value={form.toners[tc.key] || 0}
-                          onChange={(e) => updateToner(tc.key, e.target.value)}
-                          style={{ flex: 1, accentColor: tc.barColor || tc.color }} />
-                        <input type="number" min={0} max={100} value={form.toners[tc.key] ?? ""}
-                          onChange={(e) => updateToner(tc.key, e.target.value)}
-                          style={{ ...inputStyle, width: 52, textAlign: "center", padding: "5px 4px", fontSize: 12 }} />
+                        <input type="range" min={0} max={100} value={form.toners[tc.key] || 0} onChange={(e) => updateToner(tc.key, e.target.value)} style={{ flex: 1, accentColor: tc.barColor || tc.color }} />
+                        <input type="number" min={0} max={100} value={form.toners[tc.key] ?? ""} onChange={(e) => updateToner(tc.key, e.target.value)} style={{ ...inputStyle, width: 52, textAlign: "center", padding: "5px 4px", fontSize: 12 }} />
                         <span style={{ fontSize: 11, color: "#858585", width: 14 }}>%</span>
                       </div>
                     ))}
                   </div>
                 </div>
 
-                {/* Paper Trays */}
                 <div style={{ marginBottom: 20, backgroundColor: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.06)", borderRadius: 8, overflow: "hidden" }}>
                   <div style={{ ...sectionHeader, fontSize: 12, justifyContent: "space-between" }}>
                     <span style={{ display: "flex", alignItems: "center", gap: 8 }}>📄 Paper Trays</span>
@@ -491,32 +576,19 @@
                       <div key={ti} style={{ backgroundColor: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.05)", borderRadius: 6, padding: 10 }}>
                         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
                           <span style={{ fontSize: 12, fontWeight: 600, color: "#8EA4BD" }}>Tray {ti + 1}</span>
-                          {form.trays.length > 1 && (
-                            <button onClick={() => removeTray(ti)} style={{ background: "none", border: "none", color: "#D83A35", cursor: "pointer", fontSize: 12, padding: 2 }}>✕ Remove</button>
-                          )}
+                          {form.trays.length > 1 && <button onClick={() => removeTray(ti)} style={{ background: "none", border: "none", color: "#D83A35", cursor: "pointer", fontSize: 12, padding: 2 }}>✕ Remove</button>}
                         </div>
                         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                          <label style={{ flex: "1 1 100px" }}>
-                            <span style={{ fontSize: 10, color: "#646464" }}>Name</span>
-                            <input value={tray.name} onChange={(e) => updateTray(ti, "name", e.target.value)} placeholder="Tray 1" style={{ ...inputStyle, fontSize: 12, padding: "6px 8px" }} />
-                          </label>
-                          <label style={{ flex: "0 0 70px" }}>
-                            <span style={{ fontSize: 10, color: "#646464" }}>Level %</span>
-                            <input type="number" min={0} max={100} value={tray.status} onChange={(e) => updateTray(ti, "status", e.target.value)}
-                              style={{ ...inputStyle, fontSize: 12, padding: "6px 8px", textAlign: "center" }} />
-                          </label>
-                          <label style={{ flex: "1 1 130px" }}>
-                            <span style={{ fontSize: 10, color: "#646464" }}>Paper Size</span>
+                          <label style={{ flex: "1 1 100px" }}><span style={{ fontSize: 10, color: "#646464" }}>Name</span>
+                            <input value={tray.name} onChange={(e) => updateTray(ti, "name", e.target.value)} placeholder="Tray 1" style={{ ...inputStyle, fontSize: 12, padding: "6px 8px" }} /></label>
+                          <label style={{ flex: "0 0 70px" }}><span style={{ fontSize: 10, color: "#646464" }}>Level %</span>
+                            <input type="number" min={0} max={100} value={tray.status} onChange={(e) => updateTray(ti, "status", e.target.value)} style={{ ...inputStyle, fontSize: 12, padding: "6px 8px", textAlign: "center" }} /></label>
+                          <label style={{ flex: "1 1 130px" }}><span style={{ fontSize: 10, color: "#646464" }}>Paper Size</span>
                             <select value={tray.paperSize} onChange={(e) => updateTray(ti, "paperSize", e.target.value)} style={{ ...selectStyle, fontSize: 12, padding: "6px 8px" }}>
-                              {PAPER_SIZES.map((s) => <option key={s} value={s} style={optionStyle}>{s}</option>)}
-                            </select>
-                          </label>
-                          <label style={{ flex: "1 1 120px" }}>
-                            <span style={{ fontSize: 10, color: "#646464" }}>Paper Type</span>
+                              {PAPER_SIZES.map((s) => <option key={s} value={s} style={optionStyle}>{s}</option>)}</select></label>
+                          <label style={{ flex: "1 1 120px" }}><span style={{ fontSize: 10, color: "#646464" }}>Paper Type</span>
                             <select value={tray.paperType} onChange={(e) => updateTray(ti, "paperType", e.target.value)} style={{ ...selectStyle, fontSize: 12, padding: "6px 8px" }}>
-                              {PAPER_TYPES.map((t) => <option key={t} value={t} style={optionStyle}>{t}</option>)}
-                            </select>
-                          </label>
+                              {PAPER_TYPES.map((t) => <option key={t} value={t} style={optionStyle}>{t}</option>)}</select></label>
                         </div>
                       </div>
                     ))}
@@ -537,7 +609,20 @@
       );
     }
 
-    ReactDOM.createRoot(document.getElementById("root")).render(<PrinterTracker />);
+    /* ═══════════════ APP ROUTER ═══════════════ */
+    function App() {
+      const [authed, setAuthed] = useState(() => sessionStorage.getItem("printer-auth") === "1");
+
+      const handleLogout = () => {
+        sessionStorage.removeItem("printer-auth");
+        setAuthed(false);
+      };
+
+      if (!authed) return <LoginScreen onLogin={() => setAuthed(true)} />;
+      return <PrinterTracker onLogout={handleLogout} />;
+    }
+
+    ReactDOM.createRoot(document.getElementById("root")).render(<App />);
   </script>
 </body>
 </html>
