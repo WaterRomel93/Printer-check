@@ -1,0 +1,543 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Printer Inventory Tracker — Puretec Industrial Water</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🖨️</text></svg>" />
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.3.1/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.3.1/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.26.2/babel.min.js"></script>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #111318; }
+    ::-webkit-scrollbar { width: 8px; height: 8px; }
+    ::-webkit-scrollbar-track { background: rgba(255,255,255,0.03); }
+    ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.12); border-radius: 4px; }
+    ::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.2); }
+    input[type="range"] { height: 6px; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel">
+    const { useState, useEffect, useCallback } = React;
+
+    const BRANCHES = ["Oxnard", "Oxnard 3501", "Anaheim", "Arizona", "San Diego", "San Jose"];
+    const STORAGE_KEY = "printer-inventory-data";
+
+    const TONER_COLORS = [
+      { key: "black", label: "Black", color: "#222222", barColor: "#333333" },
+      { key: "cyan", label: "Cyan", color: "#00AEEF" },
+      { key: "magenta", label: "Magenta", color: "#EC008C" },
+      { key: "yellow", label: "Yellow", color: "#FFD700" },
+    ];
+
+    const PAPER_SIZES = ["Letter (8.5x11)", "Legal (8.5x14)", "Ledger (11x17)", "A4", "A3", "Custom"];
+    const PAPER_TYPES = ["Plain Paper 1", "Plain Paper 2", "Letter Head", "Recycled", "Cardstock", "Labels", "Envelope"];
+
+    const DEFAULT_TONERS = { black: 100, cyan: 100, magenta: 100, yellow: 100 };
+    const DEFAULT_TRAY = { name: "", status: 100, paperSize: "Letter (8.5x11)", paperType: "Plain Paper 1" };
+    const EMPTY_FORM = {
+      id: "", name: "", branch: "Oxnard", model: "", isColor: true,
+      toners: { ...DEFAULT_TONERS },
+      trays: [{ ...DEFAULT_TRAY, name: "Tray 1" }],
+    };
+
+    const PuretecLogo = () => (
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0.001 0 178 95" style={{ height: 28, flexShrink: 0 }}>
+        <path fill="#fff" stroke="#fff" strokeWidth="1.7313" d="M27.856,82.056c8.787-33.964,18.206-53.287,53.363-80.81C-26.759,14.715-5.415,63.902,27.856,82.056z"/>
+        <path fill="#fff" stroke="#fff" strokeWidth="1.7313" d="M154.669,16.472c-4.541,20.733-17.992,52.018-52.734,77.294C201.749,77.37,182.142,28.422,154.669,16.472z"/>
+        <path fill="#fff" stroke="#fff" strokeWidth="1.7313" d="M40.437,87.77c-0.16,0.037,10.021,0.726,9.393,0.726c0-52.115,48.238-75.228,59.487-75.221c39.097,3.646-50.07,92.788-41.281,35.402C42.298,85.567,79.962,76.197,79.334,76.197c10.044-1.755,42.062-27.521,47.712-48.016c1.882-4.684,13.184-26.351-16.322-26.351C80.59,8.271,41.668,38.722,40.413,87.91"/>
+      </svg>
+    );
+
+    const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+
+    const statusLabel = (level) => {
+      if (level > 75) return "Over 75%";
+      if (level > 50) return "Over 50%";
+      if (level > 25) return "Over 25%";
+      if (level > 0) return "Low";
+      return "Empty";
+    };
+
+    const tonerZone = (level) => {
+      if (level > 50) return { label: "Good", color: "#5CB85C" };
+      if (level >= 25) return { label: "Low", color: "#F0AD4E" };
+      return { label: "Critical", color: "#D83A35" };
+    };
+
+    const worstToner = (toners) => {
+      if (!toners) return 100;
+      return Math.min(...Object.values(toners).map(Number));
+    };
+
+    const migratePrinter = (p) => {
+      if (p.toners && p.trays) return p;
+      const level = typeof p.toner === "number" ? p.toner : 100;
+      return {
+        ...p,
+        isColor: p.isColor !== undefined ? p.isColor : true,
+        toners: p.toners || { black: level, cyan: level, magenta: level, yellow: level },
+        trays: p.trays || [{ name: "Tray 1", status: 100, paperSize: "Letter (8.5x11)", paperType: "Plain Paper 1" }],
+      };
+    };
+
+    /* ─── localStorage-based persistence ─── */
+    function loadPrinters() {
+      try {
+        const raw = localStorage.getItem(STORAGE_KEY);
+        const data = raw ? JSON.parse(raw) : [];
+        return data.map(migratePrinter);
+      } catch { return []; }
+    }
+
+    function savePrinters(printers) {
+      try { localStorage.setItem(STORAGE_KEY, JSON.stringify(printers)); }
+      catch (e) { console.error("Storage save error:", e); }
+    }
+
+    /* ─── Shared Styles ─── */
+    const cellPad = { padding: "7px 12px" };
+    const sectionHeader = {
+      fontSize: 13, fontWeight: 600, color: "#8EA4BD", padding: "10px 14px",
+      borderBottom: "1px solid rgba(255,255,255,0.06)", display: "flex", alignItems: "center", gap: 8,
+    };
+    const inputStyle = {
+      width: "100%", padding: "9px 11px", borderRadius: 8, border: "1px solid rgba(255,255,255,0.12)",
+      backgroundColor: "rgba(255,255,255,0.06)", color: "#e0e0e0", fontSize: 13, outline: "none",
+      fontFamily: "'Helvetica Neue', Helvetica, Arial, sans-serif", boxSizing: "border-box",
+    };
+    const btnPrimary = {
+      padding: "9px 20px", borderRadius: 8, border: "none", cursor: "pointer",
+      backgroundColor: "#1664B5", color: "#fff", fontWeight: 600, fontSize: 13,
+      fontFamily: "'Helvetica Neue', Helvetica, Arial, sans-serif", transition: "background 0.2s",
+    };
+    const btnGhost = {
+      ...btnPrimary, backgroundColor: "transparent", border: "1px solid rgba(255,255,255,0.15)", color: "#ccc",
+    };
+    const selectStyle = { ...inputStyle, appearance: "auto", backgroundColor: "#1e2129" };
+    const optionStyle = { backgroundColor: "#1e2129", color: "#e0e0e0" };
+
+    /* ─── Sub-components ─── */
+    const TonerBarRow = ({ label, level, barColor }) => (
+      <tr style={{ borderBottom: "1px solid rgba(255,255,255,0.04)" }}>
+        <td style={{ ...cellPad, fontSize: 12, color: "#c0c0c0", width: 100 }}>{label}</td>
+        <td style={{ ...cellPad, fontSize: 12, color: "#858585", width: 70 }}>{statusLabel(level)}</td>
+        <td style={{ ...cellPad }}>
+          <div style={{ height: 14, borderRadius: 2, backgroundColor: "rgba(255,255,255,0.06)", overflow: "hidden" }}>
+            <div style={{ width: `${level}%`, height: "100%", backgroundColor: barColor || "#999", transition: "width 0.4s ease" }} />
+          </div>
+        </td>
+      </tr>
+    );
+
+    const PaperTrayRow = ({ tray, idx }) => {
+      const level = Number(tray.status);
+      const paperColor = level === 0 ? "#D83A35" : level <= 25 ? "#F0AD4E" : "#5CB85C";
+      return (
+        <tr style={{ borderBottom: "1px solid rgba(255,255,255,0.04)" }}>
+          <td style={{ ...cellPad, fontSize: 12, color: "#c0c0c0" }}>{tray.name || `Tray ${idx + 1}`}</td>
+          <td style={{ ...cellPad, fontSize: 12, color: paperColor, fontWeight: 500 }}>{level === 0 ? "Empty" : `${level}%`}</td>
+          <td style={{ ...cellPad, fontSize: 12, color: "#858585" }}>{tray.paperSize}</td>
+          <td style={{ ...cellPad, fontSize: 12, color: "#858585" }}>{tray.paperType}</td>
+        </tr>
+      );
+    };
+
+    const KpiCard = ({ value, label, color }) => (
+      <div style={{
+        backgroundColor: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.08)",
+        borderRadius: 10, padding: "16px 12px", textAlign: "center", flex: "1 1 0", minWidth: 90,
+      }}>
+        <div style={{ fontSize: 28, fontWeight: 700, color: color || "#fff", lineHeight: 1.1 }}>{value}</div>
+        <div style={{ fontSize: 11, color: "#858585", marginTop: 5, letterSpacing: 0.3 }}>{label}</div>
+      </div>
+    );
+
+    const Badge = ({ zone }) => (
+      <span style={{
+        display: "inline-block", padding: "2px 10px", borderRadius: 4,
+        fontSize: 11, fontWeight: 600, color: "#fff", backgroundColor: zone.color,
+      }}>{zone.label}</span>
+    );
+
+    /* ═══════════════════ MAIN APP ═══════════════════ */
+    function PrinterTracker() {
+      const [printers, setPrinters] = useState(() => loadPrinters());
+      const [form, setForm] = useState(JSON.parse(JSON.stringify(EMPTY_FORM)));
+      const [editing, setEditing] = useState(false);
+      const [showForm, setShowForm] = useState(false);
+      const [filter, setFilter] = useState("All");
+      const [expanded, setExpanded] = useState(null);
+      const [deleteConfirm, setDeleteConfirm] = useState(null);
+      const [sortCol, setSortCol] = useState(null);
+      const [sortDir, setSortDir] = useState("asc");
+
+      const persist = useCallback((next) => { setPrinters(next); savePrinters(next); }, []);
+
+      const openAdd = () => { setForm(JSON.parse(JSON.stringify(EMPTY_FORM))); setEditing(false); setShowForm(true); };
+      const openEdit = (p) => { setForm(JSON.parse(JSON.stringify(p))); setEditing(true); setShowForm(true); };
+      const closeForm = () => { setShowForm(false); setEditing(false); };
+
+      const clampToners = (t) => {
+        const out = {};
+        for (const k of Object.keys(t)) out[k] = Math.min(100, Math.max(0, Number(t[k]) || 0));
+        return out;
+      };
+
+      const handleSubmit = () => {
+        if (!form.name.trim() || !form.model.trim()) return;
+        const clean = {
+          ...form,
+          toners: clampToners(form.toners),
+          trays: form.trays.map((t) => ({ ...t, status: Math.min(100, Math.max(0, Number(t.status) || 0)) })),
+        };
+        if (!clean.isColor) { clean.toners = { ...clean.toners, cyan: 0, magenta: 0, yellow: 0 }; }
+        if (editing) persist(printers.map((p) => (p.id === clean.id ? clean : p)));
+        else persist([...printers, { ...clean, id: uid() }]);
+        closeForm();
+      };
+
+      const handleDelete = (id) => { persist(printers.filter((p) => p.id !== id)); setDeleteConfirm(null); };
+
+      const handleSort = (col) => {
+        if (sortCol === col) setSortDir(sortDir === "asc" ? "desc" : "asc");
+        else { setSortCol(col); setSortDir("asc"); }
+      };
+
+      const filtered = printers.filter((p) => filter === "All" || p.branch === filter);
+      const sorted = [...filtered].sort((a, b) => {
+        if (!sortCol) return 0;
+        let av, bv;
+        if (sortCol === "toner") { av = worstToner(a.toners); bv = worstToner(b.toners); }
+        else { av = (a[sortCol] || "").toString().toLowerCase(); bv = (b[sortCol] || "").toString().toLowerCase(); }
+        if (av < bv) return sortDir === "asc" ? -1 : 1;
+        if (av > bv) return sortDir === "asc" ? 1 : -1;
+        return 0;
+      });
+
+      const summaryByBranch = (branch) => {
+        const list = printers.filter((p) => branch === "All" || p.branch === branch);
+        return {
+          total: list.length,
+          good: list.filter((p) => worstToner(p.toners) > 50).length,
+          low: list.filter((p) => { const w = worstToner(p.toners); return w >= 25 && w <= 50; }).length,
+          critical: list.filter((p) => worstToner(p.toners) < 25).length,
+        };
+      };
+      const stats = summaryByBranch(filter);
+
+      const SortArrow = ({ col }) => {
+        if (sortCol !== col) return <span style={{ opacity: 0.3, marginLeft: 4 }}>↕</span>;
+        return <span style={{ marginLeft: 4 }}>{sortDir === "asc" ? "↑" : "↓"}</span>;
+      };
+
+      const updateToner = (key, val) => setForm({ ...form, toners: { ...form.toners, [key]: val === "" ? "" : Number(val) } });
+      const updateTray = (idx, field, val) => {
+        const trays = [...form.trays];
+        trays[idx] = { ...trays[idx], [field]: val };
+        setForm({ ...form, trays });
+      };
+      const addTray = () => setForm({ ...form, trays: [...form.trays, { ...DEFAULT_TRAY, name: `Tray ${form.trays.length + 1}` }] });
+      const removeTray = (idx) => { if (form.trays.length <= 1) return; setForm({ ...form, trays: form.trays.filter((_, i) => i !== idx) }); };
+
+      return (
+        <div style={{ minHeight: "100vh", backgroundColor: "#111318", color: "#e0e0e0", fontFamily: "'Helvetica Neue', Helvetica, Arial, sans-serif", fontSize: 13 }}>
+
+          {/* HEADER */}
+          <div style={{ background: "linear-gradient(135deg, #0D3C6D 0%, #1664B5 100%)", padding: "18px 22px", display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap" }}>
+            <PuretecLogo />
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: 21, fontWeight: 700, color: "#fff", letterSpacing: -0.3 }}>Printer Inventory Tracker</div>
+              <div style={{ fontSize: 12, color: "#C9D5DE", marginTop: 2 }}>{printers.length} printer{printers.length !== 1 ? "s" : ""} across {BRANCHES.length} branches</div>
+            </div>
+            <button onClick={openAdd} style={{ ...btnPrimary, backgroundColor: "rgba(255,255,255,0.15)", backdropFilter: "blur(4px)" }}>+ Add Printer</button>
+          </div>
+
+          <div style={{ maxWidth: 1100, margin: "0 auto", padding: "18px 14px" }}>
+
+            {/* BRANCH FILTER */}
+            <div style={{ display: "flex", gap: 5, flexWrap: "wrap", marginBottom: 18 }}>
+              {["All", ...BRANCHES].map((b) => {
+                const active = filter === b;
+                const count = b === "All" ? printers.length : printers.filter((p) => p.branch === b).length;
+                return (
+                  <button key={b} onClick={() => setFilter(b)} style={{
+                    padding: "6px 14px", borderRadius: 20, border: "1px solid",
+                    borderColor: active ? "#1664B5" : "rgba(255,255,255,0.1)",
+                    backgroundColor: active ? "rgba(22,100,181,0.2)" : "transparent",
+                    color: active ? "#5C93CB" : "#858585", cursor: "pointer",
+                    fontSize: 12, fontWeight: active ? 600 : 400,
+                    fontFamily: "'Helvetica Neue', Helvetica, Arial, sans-serif", transition: "all 0.2s",
+                  }}>{b} <span style={{ opacity: 0.6 }}>({count})</span></button>
+                );
+              })}
+            </div>
+
+            {/* KPI CARDS */}
+            <div style={{ display: "flex", gap: 10, marginBottom: 20, flexWrap: "wrap" }}>
+              <KpiCard value={stats.total} label="Total Printers" color="#fff" />
+              <KpiCard value={stats.good} label="Good (>50%)" color="#5CB85C" />
+              <KpiCard value={stats.low} label="Low (25–50%)" color="#F0AD4E" />
+              <KpiCard value={stats.critical} label="Critical (<25%)" color="#D83A35" />
+            </div>
+
+            {/* BRANCH BREAKDOWN */}
+            {filter === "All" && printers.length > 0 && (
+              <div style={{ marginBottom: 20, backgroundColor: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.06)", borderRadius: 10, overflow: "hidden" }}>
+                <div style={sectionHeader}>Toner Status by Branch</div>
+                <div style={{ overflowX: "auto" }}>
+                  <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                    <thead>
+                      <tr style={{ backgroundColor: "rgba(22,100,181,0.15)" }}>
+                        {["Branch", "Total", "Good", "Low", "Critical"].map((h) => (
+                          <th key={h} style={{ padding: "7px 14px", textAlign: h === "Branch" ? "left" : "center", fontSize: 11, fontWeight: 600, color: "#8EA4BD" }}>{h}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {BRANCHES.map((branch, i) => {
+                        const s = summaryByBranch(branch);
+                        return (
+                          <tr key={branch} style={{ backgroundColor: i % 2 === 0 ? "transparent" : "rgba(255,255,255,0.02)" }}>
+                            <td style={{ padding: "7px 14px", fontWeight: 500 }}>{branch}</td>
+                            <td style={{ padding: "7px 14px", textAlign: "center" }}>{s.total}</td>
+                            <td style={{ padding: "7px 14px", textAlign: "center", color: "#5CB85C" }}>{s.good}</td>
+                            <td style={{ padding: "7px 14px", textAlign: "center", color: "#F0AD4E" }}>{s.low}</td>
+                            <td style={{ padding: "7px 14px", textAlign: "center", color: "#D83A35" }}>{s.critical}</td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+
+            {/* PRINTER LIST */}
+            {sorted.length === 0 ? (
+              <div style={{ textAlign: "center", padding: "50px 20px", color: "#646464", border: "1px dashed rgba(255,255,255,0.1)", borderRadius: 10 }}>
+                <div style={{ fontSize: 38, marginBottom: 8 }}>🖨️</div>
+                <div style={{ fontSize: 15, fontWeight: 500 }}>No printers found</div>
+                <div style={{ fontSize: 12, marginTop: 5 }}>{filter !== "All" ? `No printers at ${filter}. ` : ""}Click <strong>+ Add Printer</strong> to get started.</div>
+              </div>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                {sorted.map((p) => {
+                  const worst = worstToner(p.toners);
+                  const zone = tonerZone(worst);
+                  const isOpen = expanded === p.id;
+                  const toners = p.isColor !== false ? TONER_COLORS : [TONER_COLORS[0]];
+                  return (
+                    <div key={p.id} style={{
+                      backgroundColor: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.06)",
+                      borderRadius: 10, overflow: "hidden", transition: "border-color 0.2s",
+                      borderColor: isOpen ? "rgba(22,100,181,0.3)" : "rgba(255,255,255,0.06)",
+                    }}>
+                      {/* Row summary */}
+                      <div onClick={() => setExpanded(isOpen ? null : p.id)} style={{
+                        display: "flex", alignItems: "center", gap: 12, padding: "12px 16px", cursor: "pointer", flexWrap: "wrap",
+                      }}>
+                        <span style={{ fontSize: 11, color: "#646464", transition: "transform 0.2s", transform: isOpen ? "rotate(90deg)" : "rotate(0deg)" }}>▶</span>
+                        <div style={{ flex: "1 1 150px", minWidth: 120 }}>
+                          <div style={{ fontWeight: 600, fontSize: 14, color: "#fff" }}>{p.name}</div>
+                          <div style={{ fontSize: 11, color: "#858585", marginTop: 2 }}>{p.model}</div>
+                        </div>
+                        <div style={{ fontSize: 12, color: "#8EA4BD", minWidth: 90 }}>{p.branch}</div>
+                        <div style={{ display: "flex", gap: 3, alignItems: "flex-end", height: 20, minWidth: 60 }}>
+                          {toners.map((tc) => (
+                            <div key={tc.key} style={{ width: toners.length === 1 ? 20 : 12, height: 20, borderRadius: 2, backgroundColor: "rgba(255,255,255,0.08)", position: "relative", overflow: "hidden" }}>
+                              <div style={{ position: "absolute", bottom: 0, width: "100%", height: `${p.toners[tc.key] || 0}%`, backgroundColor: tc.barColor || tc.color, transition: "height 0.4s ease" }} />
+                            </div>
+                          ))}
+                        </div>
+                        <Badge zone={zone} />
+                        <div style={{ display: "flex", gap: 5 }} onClick={(e) => e.stopPropagation()}>
+                          <button title="Edit" onClick={() => openEdit(p)} style={{ ...btnGhost, padding: "4px 10px", fontSize: 11 }}>✏️</button>
+                          {deleteConfirm === p.id ? (
+                            <React.Fragment>
+                              <button onClick={() => handleDelete(p.id)} style={{ ...btnPrimary, padding: "4px 10px", fontSize: 11, backgroundColor: "#D83A35" }}>Yes</button>
+                              <button onClick={() => setDeleteConfirm(null)} style={{ ...btnGhost, padding: "4px 10px", fontSize: 11 }}>No</button>
+                            </React.Fragment>
+                          ) : (
+                            <button title="Delete" onClick={() => setDeleteConfirm(p.id)} style={{ ...btnGhost, padding: "4px 10px", fontSize: 11, borderColor: "rgba(216,58,53,0.3)", color: "#D83A35" }}>🗑️</button>
+                          )}
+                        </div>
+                      </div>
+
+                      {/* Expanded detail */}
+                      {isOpen && (
+                        <div style={{ borderTop: "1px solid rgba(255,255,255,0.06)" }}>
+                          <div style={{ display: "flex", flexWrap: "wrap" }}>
+                            <div style={{ flex: "1 1 320px", borderRight: "1px solid rgba(255,255,255,0.04)" }}>
+                              <div style={sectionHeader}><span style={{ fontSize: 14 }}>🎨</span> Supply Status</div>
+                              <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                                <thead>
+                                  <tr style={{ backgroundColor: "rgba(22,100,181,0.1)" }}>
+                                    <th style={{ ...cellPad, textAlign: "left", fontSize: 11, fontWeight: 600, color: "#8EA4BD" }}>Supply</th>
+                                    <th style={{ ...cellPad, textAlign: "left", fontSize: 11, fontWeight: 600, color: "#8EA4BD" }}>Status</th>
+                                    <th style={{ ...cellPad, textAlign: "left", fontSize: 11, fontWeight: 600, color: "#8EA4BD" }}>Level</th>
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {toners.map((tc) => (
+                                    <TonerBarRow key={tc.key} label={`${tc.label} Toner`} level={p.toners[tc.key] || 0} barColor={tc.barColor || tc.color} />
+                                  ))}
+                                </tbody>
+                              </table>
+                            </div>
+                            <div style={{ flex: "1 1 380px" }}>
+                              <div style={sectionHeader}><span style={{ fontSize: 14 }}>📄</span> Paper Input Tray Status</div>
+                              {p.trays && p.trays.length > 0 ? (
+                                <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                                  <thead>
+                                    <tr style={{ backgroundColor: "rgba(22,100,181,0.1)" }}>
+                                      {["Tray", "Status", "Paper Size", "Paper Type"].map((h) => (
+                                        <th key={h} style={{ ...cellPad, textAlign: "left", fontSize: 11, fontWeight: 600, color: "#8EA4BD" }}>{h}</th>
+                                      ))}
+                                    </tr>
+                                  </thead>
+                                  <tbody>
+                                    {p.trays.map((tray, ti) => <PaperTrayRow key={ti} tray={tray} idx={ti} />)}
+                                  </tbody>
+                                </table>
+                              ) : (
+                                <div style={{ padding: 16, color: "#646464", fontSize: 12 }}>No paper trays configured.</div>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
+            <div style={{ marginTop: 22, textAlign: "center", fontSize: 11, color: "#646464", borderTop: "1px solid rgba(255,255,255,0.06)", paddingTop: 14 }}>
+              Puretec Industrial Water — Printer Inventory Tracker • Data persisted locally
+            </div>
+          </div>
+
+          {/* MODAL FORM */}
+          {showForm && (
+            <div onClick={closeForm} style={{
+              position: "fixed", inset: 0, backgroundColor: "rgba(0,0,0,0.6)",
+              display: "flex", alignItems: "flex-start", justifyContent: "center",
+              zIndex: 1000, padding: "40px 14px", backdropFilter: "blur(4px)", overflowY: "auto",
+            }}>
+              <div onClick={(e) => e.stopPropagation()} style={{
+                backgroundColor: "#1a1d24", border: "1px solid rgba(255,255,255,0.1)",
+                borderRadius: 14, padding: 24, width: "100%", maxWidth: 560,
+                boxShadow: "0 24px 60px rgba(0,0,0,0.5)",
+              }}>
+                <div style={{ fontSize: 17, fontWeight: 700, marginBottom: 18, color: "#fff" }}>
+                  {editing ? "Edit Printer" : "Add Printer"}
+                </div>
+
+                <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 12 }}>
+                  <label style={{ flex: "1 1 200px" }}>
+                    <span style={{ fontSize: 11, color: "#858585", marginBottom: 3, display: "block" }}>Printer Name</span>
+                    <input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="e.g. Front Desk HP" style={inputStyle} />
+                  </label>
+                  <label style={{ flex: "1 1 140px" }}>
+                    <span style={{ fontSize: 11, color: "#858585", marginBottom: 3, display: "block" }}>Branch</span>
+                    <select value={form.branch} onChange={(e) => setForm({ ...form, branch: e.target.value })} style={selectStyle}>
+                      {BRANCHES.map((b) => <option key={b} value={b} style={optionStyle}>{b}</option>)}
+                    </select>
+                  </label>
+                </div>
+                <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 16 }}>
+                  <label style={{ flex: "1 1 200px" }}>
+                    <span style={{ fontSize: 11, color: "#858585", marginBottom: 3, display: "block" }}>Make / Model</span>
+                    <input value={form.model} onChange={(e) => setForm({ ...form, model: e.target.value })} placeholder="e.g. HP LaserJet Pro M404dn" style={inputStyle} />
+                  </label>
+                  <label style={{ flex: "0 0 auto", display: "flex", alignItems: "flex-end", gap: 8, paddingBottom: 4 }}>
+                    <input type="checkbox" checked={form.isColor} onChange={(e) => setForm({ ...form, isColor: e.target.checked })} style={{ accentColor: "#1664B5" }} />
+                    <span style={{ fontSize: 12, color: "#c0c0c0" }}>Color printer</span>
+                  </label>
+                </div>
+
+                {/* Toner Levels */}
+                <div style={{ marginBottom: 16, backgroundColor: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.06)", borderRadius: 8, overflow: "hidden" }}>
+                  <div style={{ ...sectionHeader, fontSize: 12 }}>🎨 Supply Levels</div>
+                  <div style={{ padding: "10px 14px", display: "flex", flexDirection: "column", gap: 8 }}>
+                    {(form.isColor ? TONER_COLORS : [TONER_COLORS[0]]).map((tc) => (
+                      <div key={tc.key} style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                        <div style={{ width: 12, height: 12, borderRadius: 2, backgroundColor: tc.barColor || tc.color, flexShrink: 0 }} />
+                        <span style={{ fontSize: 12, color: "#c0c0c0", width: 65, flexShrink: 0 }}>{tc.label}</span>
+                        <input type="range" min={0} max={100} value={form.toners[tc.key] || 0}
+                          onChange={(e) => updateToner(tc.key, e.target.value)}
+                          style={{ flex: 1, accentColor: tc.barColor || tc.color }} />
+                        <input type="number" min={0} max={100} value={form.toners[tc.key] ?? ""}
+                          onChange={(e) => updateToner(tc.key, e.target.value)}
+                          style={{ ...inputStyle, width: 52, textAlign: "center", padding: "5px 4px", fontSize: 12 }} />
+                        <span style={{ fontSize: 11, color: "#858585", width: 14 }}>%</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Paper Trays */}
+                <div style={{ marginBottom: 20, backgroundColor: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.06)", borderRadius: 8, overflow: "hidden" }}>
+                  <div style={{ ...sectionHeader, fontSize: 12, justifyContent: "space-between" }}>
+                    <span style={{ display: "flex", alignItems: "center", gap: 8 }}>📄 Paper Trays</span>
+                    <button onClick={addTray} style={{ ...btnPrimary, padding: "3px 10px", fontSize: 11 }}>+ Tray</button>
+                  </div>
+                  <div style={{ padding: "10px 14px", display: "flex", flexDirection: "column", gap: 10 }}>
+                    {form.trays.map((tray, ti) => (
+                      <div key={ti} style={{ backgroundColor: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.05)", borderRadius: 6, padding: 10 }}>
+                        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
+                          <span style={{ fontSize: 12, fontWeight: 600, color: "#8EA4BD" }}>Tray {ti + 1}</span>
+                          {form.trays.length > 1 && (
+                            <button onClick={() => removeTray(ti)} style={{ background: "none", border: "none", color: "#D83A35", cursor: "pointer", fontSize: 12, padding: 2 }}>✕ Remove</button>
+                          )}
+                        </div>
+                        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                          <label style={{ flex: "1 1 100px" }}>
+                            <span style={{ fontSize: 10, color: "#646464" }}>Name</span>
+                            <input value={tray.name} onChange={(e) => updateTray(ti, "name", e.target.value)} placeholder="Tray 1" style={{ ...inputStyle, fontSize: 12, padding: "6px 8px" }} />
+                          </label>
+                          <label style={{ flex: "0 0 70px" }}>
+                            <span style={{ fontSize: 10, color: "#646464" }}>Level %</span>
+                            <input type="number" min={0} max={100} value={tray.status} onChange={(e) => updateTray(ti, "status", e.target.value)}
+                              style={{ ...inputStyle, fontSize: 12, padding: "6px 8px", textAlign: "center" }} />
+                          </label>
+                          <label style={{ flex: "1 1 130px" }}>
+                            <span style={{ fontSize: 10, color: "#646464" }}>Paper Size</span>
+                            <select value={tray.paperSize} onChange={(e) => updateTray(ti, "paperSize", e.target.value)} style={{ ...selectStyle, fontSize: 12, padding: "6px 8px" }}>
+                              {PAPER_SIZES.map((s) => <option key={s} value={s} style={optionStyle}>{s}</option>)}
+                            </select>
+                          </label>
+                          <label style={{ flex: "1 1 120px" }}>
+                            <span style={{ fontSize: 10, color: "#646464" }}>Paper Type</span>
+                            <select value={tray.paperType} onChange={(e) => updateTray(ti, "paperType", e.target.value)} style={{ ...selectStyle, fontSize: 12, padding: "6px 8px" }}>
+                              {PAPER_TYPES.map((t) => <option key={t} value={t} style={optionStyle}>{t}</option>)}
+                            </select>
+                          </label>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+                  <button onClick={closeForm} style={btnGhost}>Cancel</button>
+                  <button onClick={handleSubmit} disabled={!form.name.trim() || !form.model.trim()}
+                    style={{ ...btnPrimary, opacity: !form.name.trim() || !form.model.trim() ? 0.4 : 1, cursor: !form.name.trim() || !form.model.trim() ? "not-allowed" : "pointer" }}>
+                    {editing ? "Save Changes" : "Add Printer"}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById("root")).render(<PrinterTracker />);
+  </script>
+</body>
+</html>
